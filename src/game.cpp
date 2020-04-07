@@ -1,15 +1,64 @@
 #include "game.h"
 #include <iostream>
 #include "SDL.h"
+#include <queue>
+#include <future>
 
 Game::Game(std::size_t grid_width, std::size_t grid_height)
     : snake(grid_width, grid_height),
       engine(dev()),
       random_w(0, static_cast<int>(grid_width)),
       random_h(0, static_cast<int>(grid_height)) {
-  PlaceFood();
+  queue = std::make_shared<MessageQueue<SDL_Point>>();
+  // set default values to life,double_food and food
+  reset(life);
+  reset(double_food);
+  reset(food);
+  on = true;
+  //start placing the food in a different thread
+  start_thread = std::thread(&Game::PlaceFood, this);
+  //initial food
+  food = queue->receive();
 }
 
+//destructor
+Game::~Game(){
+    //stop generated food and wait for thread to finish
+    on = false;
+    start_thread.join();
+}
+
+//copy constructor
+Game::Game(const Game &source): snake(source.snake){
+    std::cout << "Game Copy Constructor Called\n" ;
+}
+
+//copy assignment operator
+Game& Game::operator=(const Game &source){
+    std::cout << "Game Copy Assignement Operator Called\n" ;
+    if(this == &source){
+        return *this;
+    }
+    snake = source.snake;
+    return *this;
+}
+
+//move constructor
+Game::Game(Game &&source): snake(source.snake){
+    std::cout<< "Game Move Constructor Called\n";
+}
+
+//move assignment operatior
+Game& Game::operator=(Game &&source){
+    std::cout<< "Game Move Assignemnt Operator Called\n";
+    if(this == &source){
+        return *this;
+    }
+    snake = source.snake;
+    return *this;
+}
+
+//main control method which takes input, updates food,score and calls render methods
 void Game::Run(Controller const &controller, Renderer &renderer,
                std::size_t target_frame_duration) {
   Uint32 title_timestamp = SDL_GetTicks();
@@ -23,12 +72,13 @@ void Game::Run(Controller const &controller, Renderer &renderer,
     frame_start = SDL_GetTicks();
 
     // Input, Update, Render - the main game loop.
+    
     controller.HandleInput(running, snake);
     Update();
-    renderer.Render(snake, food);
+    renderer.Render(snake, food, life, double_food);
 
     frame_end = SDL_GetTicks();
-
+    
     // Keep track of how long each loop through the input/update/render cycle
     // takes.
     frame_count++;
@@ -36,7 +86,7 @@ void Game::Run(Controller const &controller, Renderer &renderer,
 
     // After every second, update the window title.
     if (frame_end - title_timestamp >= 1000) {
-      renderer.UpdateWindowTitle(score, frame_count);
+      renderer.UpdateWindowTitle(score, frame_count, snake.lives);
       frame_count = 0;
       title_timestamp = frame_end;
     }
@@ -50,38 +100,126 @@ void Game::Run(Controller const &controller, Renderer &renderer,
   }
 }
 
+// method to get item from queue
+template <typename T>
+T MessageQueue<T>::receive()
+{
+        std::unique_lock<std::mutex> uLock(_mutex);
+        _cond.wait(uLock, [this] { return !_messages.empty(); }); // pass unique lock to condition variable
+
+        // remove last vector element from queue
+         T v = std::move(_messages.back());
+        _messages.pop_back();
+
+        return v; // will not be copied due to return value optimization (RVO) in C++
+}
+
+//method to push item to queue
+template <typename T>
+void MessageQueue<T>::send(T &&msg)
+{
+        // perform vector modification under the lock
+        std::lock_guard<std::mutex> uLock(_mutex);
+
+        // add vector to queue
+        _messages.push_back(std::move(msg));
+        _cond.notify_one(); // notify client after pushing new Vehicle into vector
+}
+
+template <typename T>
+bool MessageQueue<T>::isEmpty(){
+    return _messages.size()<5;
+}
+
+//returns true if point matches food/life or double_food. Returns false otherwise
+bool Game::MatchesFoodOrLife(int x, int y){
+    if(food.x==x && food.y==y)
+        return true;
+    if(double_food.x ==x && double_food.y == y)
+        return true;
+    if(life.x == x && life.y == y)
+        return true;
+    return false;
+}
+
+// generate random foods(max 5) and place in queue
 void Game::PlaceFood() {
   int x, y;
   while (true) {
-    x = random_w(engine);
-    y = random_h(engine);
-    // Check that the location is not occupied by a snake item before placing
-    // food.
-    if (!snake.SnakeCell(x, y)) {
-      food.x = x;
-      food.y = y;
-      return;
-    }
+      while (on && queue->isEmpty()) {
+          do{
+        x = random_w(engine);
+        y = random_h(engine);
+          }while(x>31 || y>31 || snake.SnakeCell(x, y));
+        // Check that the location is not occupied by a snake item before placing
+        // food.
+        if (!snake.SnakeCell(x, y)) {
+          temp_food.x = x;
+          temp_food.y = y;
+        }
+        std::async(std::launch::async, &MessageQueue<SDL_Point>::send, queue, std::move(temp_food));
+      }
+      if(!on){
+          break;
+      }
   }
 }
 
+//check whether food needs to be updated and update food/life/double_food based on the conditions
 void Game::Update() {
   if (!snake.alive) return;
-
   snake.Update();
 
   int new_x = static_cast<int>(snake.head_x);
   int new_y = static_cast<int>(snake.head_y);
-
+  bool needs_update = true;
   // Check if there's food over here
   if (food.x == new_x && food.y == new_y) {
     score++;
-    PlaceFood();
+  }else if(double_food.x == new_x && double_food.y == new_y){
+    score += 2;
+  }else if(life.x == new_x && life.y == new_y){
+      score++;
+    snake.lives += 1;
+  }else{
+      needs_update = false;
+  }
+  if(needs_update){
+    SDL_Point temp, temp1;
+    // keep getting from queue until food is not in snake body and does not match existing food
+    do{
+      temp = queue->receive();
+    }while(MatchesFoodOrLife(temp.x, temp.y) || snake.SnakeCell(temp.x, temp.y));
+    reset(life);
+    reset(food);
+    reset(double_food);
+    food = temp;
     // Grow snake and increase speed.
     snake.GrowBody();
-    snake.speed += 0.02;
+    snake.speed += 0.01;
+    //generate life and double_food randomly
+    if(score%13==0){
+      do{
+        temp1 = queue->receive();
+      }while(MatchesFoodOrLife(temp1.x, temp1.y) || snake.SnakeCell(temp1.x, temp1.y));
+      double_food = temp1;
+    }else if(score%29==0){
+        do{
+          temp1 = queue->receive();
+        }while(MatchesFoodOrLife(temp1.x, temp1.y) || snake.SnakeCell(temp1.x, temp1.y));
+        life = temp1;
+    }
   }
 }
 
+// returns the score
 int Game::GetScore() const { return score; }
+
+//returns the size
 int Game::GetSize() const { return snake.size; }
+
+//reset a SDL_point to -100,-100
+void Game::reset(SDL_Point &point){
+    point.x = -100;
+    point.y = -100;
+}

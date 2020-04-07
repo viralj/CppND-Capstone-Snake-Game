@@ -2,6 +2,7 @@
 #include <cmath>
 #include <iostream>
 
+// update complete body based on the head
 void Snake::Update() {
   SDL_Point prev_cell{
       static_cast<int>(head_x),
@@ -19,6 +20,7 @@ void Snake::Update() {
   }
 }
 
+//update snake head based on the direction
 void Snake::UpdateHead() {
   switch (direction) {
     case Direction::kUp:
@@ -43,6 +45,7 @@ void Snake::UpdateHead() {
   head_y = fmod(head_y + grid_height, grid_height);
 }
 
+//check few conditions and update the snake body
 void Snake::UpdateBody(SDL_Point &current_head_cell, SDL_Point &prev_head_cell) {
   // Add previous head location to vector
   body.push_back(prev_head_cell);
@@ -58,8 +61,22 @@ void Snake::UpdateBody(SDL_Point &current_head_cell, SDL_Point &prev_head_cell) 
   // Check if the snake has died.
   for (auto const &item : body) {
     if (current_head_cell.x == item.x && current_head_cell.y == item.y) {
-      alive = false;
+        if(this->lives<1){
+            alive = false;
+        }else{
+            this->lives--;
+        }
     }
+  }
+  
+  // Check if snake has hit the boundary
+  if((current_head_cell.x == 0) || (current_head_cell.x == this->grid_width) ||
+     (current_head_cell.y == 0) || (current_head_cell.y == this->grid_width)){
+      if(this->lives<1){
+          alive = false;
+      }else{
+          this->lives--;
+      }
   }
 }
 
